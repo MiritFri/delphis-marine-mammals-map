@@ -14,6 +14,9 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 
+  <!-- CSV parser (PapaParse) -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
   <style>
     body { margin:0; font-family: system-ui, Arial; }
     #wrap { display:grid; grid-template-columns: 360px 1fr; height:100vh; }
@@ -27,6 +30,7 @@
     button { margin-top:12px; padding:10px; width:100%; cursor:pointer; }
   </style>
 </head>
+
 <body>
 <div id="wrap">
   <div id="panel">
@@ -51,7 +55,6 @@
 
     <label>חיפוש / אזור תצפית</label>
     <input id="regionSearch" type="text" placeholder="למשל: אשדוד / תל אביב / Akhziv..." />
-
     <button id="resetBtn" type="button">איפוס סינון</button>
 
     <div class="muted" id="stats"></div>
@@ -66,14 +69,14 @@
  *  CONFIG – התאימי לשמות העמודות בגיליון
  *  ========================= */
 const CONFIG = {
-  // מזהה ה-published sheet שלך מתוך ה-URL שסיפקת:
+  // Published sheet key (כפי שיש אצלך)
   sheetKey: "2PACX-1vScGQMGuLY1A7XVcfAObxaE94n_zKVU1zsMsY3MUSD2LmWXAuLBecvLbgZ5ffXsKLVyCx3RdUIRSKx7",
 
-  // אם יש כמה טאבים, צריך gid; אם יש רק טאב אחד, לרוב עובד בלי.
-  // אם לא עובד – תגידי לי מה שם הטאב/ה-gid ונכוון.
-  gid: null,
+  // CSV publish endpoint (הכי יציב ל-GitHub Pages)
+  // אם בעתיד תגלי שאת חייבת gid לטאב אחר, נוסיף &gid=XXXX
+  csvUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vScGQMGuLY1A7XVcfAObxaE94n_zKVU1zsMsY3MUSD2LmWXAuLBecvLbgZ5ffXsKLVyCx3RdUIRSKx7/pub?output=csv",
 
-  // שמות עמודות (דוגמא – החליפי לפי הכותרות האמיתיות אצלך)
+  // שמות עמודות – התאימי לפי הכותרות האמיתיות בגיליון
   cols: {
     lat: "Latitude",
     lon: "Longitude",
@@ -84,11 +87,9 @@ const CONFIG = {
     count: "Individuals",
     calves: "Calves",
     details: "Details",
-    region: "Area" // אם אין עמודת אזור, נשתמש ב-regionSearch מול Position estimate
+    region: "Area"
   },
 
-  // אם Position estimate הוא טקסט חופשי, מומלץ להגדיר כאן “מילון” של אומדנים -> קואורדינטות
-  // (אפשר להרחיב עם הזמן, או לנהל בטאב נוסף בגיליון)
   estimateLookup: {
     "Ashdod": [31.8044, 34.6553],
     "Tel Aviv": [32.0853, 34.7818],
@@ -108,7 +109,6 @@ function formatDDMMYYYY(d) {
 }
 
 function parseDate(value) {
-  // תומך גם ב-DD/MM/YYYY וגם ב-YYYY-MM-DD
   if (!value) return null;
   const s = String(value).trim();
   const m1 = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
@@ -120,7 +120,6 @@ function parseDate(value) {
 }
 
 function tryParseLatLon(text) {
-  // אם Position estimate מכיל "lat, lon"
   if (!text) return null;
   const m = String(text).match(/(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/);
   if (!m) return null;
@@ -130,31 +129,19 @@ function tryParseLatLon(text) {
 function norm(s){ return (s ?? "").toString().trim(); }
 
 /** =========================
- *  Fetch from Google Sheets (gviz)
+ *  Fetch from Google Sheets (CSV)
  *  ========================= */
-async function fetchSheetRows() {
-  const base = `https://docs.google.com/spreadsheets/d/e/${CONFIG.sheetKey}/gviz/tq?tqx=out:json`;
-  const url = CONFIG.gid ? `${base}&gid=${encodeURIComponent(CONFIG.gid)}` : base;
+async function fetchSheetRowsCSV() {
+  const res = await fetch(CONFIG.csvUrl, { cache: "no-store" });
+  if (!res.ok) throw new Error(`CSV fetch failed: ${res.status}`);
 
-  const res = await fetch(url, { cache: "no-store" });
-  const txt = await res.text();
+  const csvText = await res.text();
+  const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
 
-  // gviz עוטף את ה-json בקריאה לפונקציה – נחלץ את האובייקט
-  const jsonText = txt.substring(txt.indexOf('{'), txt.lastIndexOf('}') + 1);
-  const data = JSON.parse(jsonText);
-
-  const cols = data.table.cols.map(c => c.label);
-  const rows = data.table.rows.map(r => r.c.map(cell => cell ? (cell.v ?? cell.f ?? "") : ""));
-
-  return { cols, rows };
-}
-
-function rowsToObjects(cols, rows) {
-  return rows.map(r => {
-    const o = {};
-    cols.forEach((c, i) => o[c] = r[i]);
-    return o;
-  });
+  if (parsed.errors && parsed.errors.length) {
+    console.warn("CSV parse errors:", parsed.errors);
+  }
+  return parsed.data; // array of objects, keys = headers
 }
 
 /** =========================
@@ -166,7 +153,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap'
 }).addTo(map);
 
-const cluster = L.markerClusterGroup(); // works even with few points
+const cluster = L.markerClusterGroup();
 map.addLayer(cluster);
 
 let allData = [];
@@ -182,7 +169,6 @@ function colorForSpecies(key) {
 }
 
 function makeMarkerIcon(color) {
-  // עיגול צבעוני קטן
   return L.divIcon({
     className: "",
     html: `<div style="
@@ -222,15 +208,11 @@ function getLatLon(item) {
   if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) > 0 && Math.abs(lon) > 0) return [lat, lon];
 
   const est = norm(item[CONFIG.cols.posEstimate]);
-
-  // 1) אם יש "lat,lon" בתוך Position estimate
   const parsed = tryParseLatLon(est);
   if (parsed) return parsed;
 
-  // 2) מילון המרות לפי מחרוזת
   if (CONFIG.estimateLookup[est]) return CONFIG.estimateLookup[est];
 
-  // 3) לא הצלחנו – לא מציגים (או אפשר לשים “רשימת טעונים תיקון”)
   return null;
 }
 
@@ -238,10 +220,14 @@ function render(data) {
   cluster.clearLayers();
   markers = [];
 
-  // fill species dropdown
-  const speciesSet = new Set(data.map(d => `${norm(d[CONFIG.cols.speciesHe])}||${norm(d[CONFIG.cols.speciesEn])}`));
   const sel = document.getElementById("speciesSelect");
   const current = sel.value;
+
+  const speciesSet = new Set(
+    data.map(d => `${norm(d[CONFIG.cols.speciesHe])}||${norm(d[CONFIG.cols.speciesEn])}`)
+       .filter(k => k !== "||")
+  );
+
   sel.innerHTML = `<option value="">כל המינים</option>`;
   [...speciesSet].sort().forEach(k => {
     const [he,en] = k.split("||");
@@ -253,7 +239,6 @@ function render(data) {
   });
   sel.value = current;
 
-  // legend
   const legend = document.getElementById("legend");
   legend.innerHTML = "";
   [...speciesSet].slice(0,12).forEach(k => {
@@ -266,7 +251,6 @@ function render(data) {
     legend.appendChild(span);
   });
 
-  // add markers
   let shown = 0;
   for (const item of data) {
     const ll = getLatLon(item);
@@ -326,9 +310,14 @@ document.getElementById("resetBtn").addEventListener("click", () => {
 });
 
 (async function init(){
-  const { cols, rows } = await fetchSheetRows();
-  allData = rowsToObjects(cols, rows);
-  render(allData);
+  try {
+    allData = await fetchSheetRowsCSV();
+    render(allData);
+  } catch (e) {
+    console.error(e);
+    document.getElementById("stats").textContent =
+      "שגיאה בטעינת נתונים מהגיליון. בדקי Console (F12).";
+  }
 })();
 </script>
 </body>
